@@ -1,13 +1,19 @@
 import os
 import posixpath
+from unittest.mock import Mock
+from unittest.mock import patch
 
 import pytest
 
 from werkzeug.security import check_password_hash
+from werkzeug.security import DEFAULT_SCRYPT_N
+from werkzeug.security import DEFAULT_SCRYPT_R
+from werkzeug.security import DEFAULT_SCRYPT_P
 from werkzeug.security import generate_password_hash
 from werkzeug.security import pbkdf2_hex
 from werkzeug.security import safe_join
 from werkzeug.security import safe_str_cmp
+from werkzeug.security import scrypt_hex
 
 
 def test_safe_str_cmp():
@@ -42,6 +48,31 @@ def test_password_hashing():
     fakehash = generate_password_hash("default", method="plain")
     assert fakehash == "plain$$default"
     assert check_password_hash(fakehash, "default")
+
+
+def test_password_hashing_using_scrypt():
+    hash0 = generate_password_hash("default", method="scrypt")
+    assert hash0.startswith(
+        f"scrypt:{DEFAULT_SCRYPT_N}:{DEFAULT_SCRYPT_R}:{DEFAULT_SCRYPT_P}$",
+    )
+
+    hash1 = generate_password_hash("default", method="scrypt:8192")
+    assert hash1.startswith(f"scrypt:8192:{DEFAULT_SCRYPT_R}:{DEFAULT_SCRYPT_P}$")
+
+    hash2 = generate_password_hash("default", method="scrypt:8192:16")
+    assert hash2.startswith(f"scrypt:8192:16:{DEFAULT_SCRYPT_P}$")
+
+    hash3 = generate_password_hash("default", method="scrypt:8192:16:2")
+    assert hash3.startswith(f"scrypt:8192:16:2$")
+
+    # Too many arguments.
+    with pytest.raises(ValueError):
+        generate_password_hash("default", method="scrypt:8192:16:2:1")
+
+    # No salt.
+    with patch("werkzeug.security.gen_salt", Mock(return_value="")):
+        with pytest.raises(ValueError):
+            generate_password_hash("default", method="scrypt")
 
 
 def test_safe_join():
@@ -173,4 +204,39 @@ def test_pbkdf2():
         32,
         "sha1",
         "9ccad6d468770cd51b10e6a68721be611a8b4d282601db3b36be9246915ec82a",
+    )
+
+
+def test_scrypt():
+    def check(data, salt, n, r, p, expected):
+        rv = scrypt_hex(data, salt=salt, n=n, r=r, p=p)
+        assert rv == expected
+
+    # Test vectors from RFC 7914.
+    check(
+        "",
+        "",
+        16,
+        1,
+        1,
+        "77d6576238657b203b19ca42c18a0497f16b4844e3074ae8dfdffa3fede21442fcd0069ded0948"
+        "f8326a753a0fc81f17e8d3e0fb2e0d3628cf35e20c38d18906",
+    )
+    check(
+        "password",
+        "NaCl",
+        1024,
+        8,
+        16,
+        "fdbabe1c9d3472007856e7190d01e9fe7c6ad7cbc8237830e77376634b3731622eaf30d92e22a3"
+        "886ff109279d9830dac727afb94a83ee6d8360cbdfa2cc0640",
+    )
+    check(
+        "pleaseletmein",
+        "SodiumChloride",
+        16384,
+        8,
+        1,
+        "7023bdcb3afd7348461c06cd81fd38ebfda8fbba904f8e3ea9b543f6545da1f2d5432955613f0f"
+        "cf62d49705242a9af9e61e85dc0d651e40dfcf017b45575887",
     )

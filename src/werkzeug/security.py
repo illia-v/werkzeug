@@ -14,9 +14,22 @@ if t.TYPE_CHECKING:
 SALT_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 DEFAULT_PBKDF2_ITERATIONS = 260000
 
+# Bigger N values require bigger memory limits than OpenSSL has by default (as of
+# OpenSSL 1.1.1f in pair with Python 3.9.1 on Ubuntu 20.04.1).
+# Ideally, users should tune the parameters for every application.
+DEFAULT_SCRYPT_N = 16384
+DEFAULT_SCRYPT_R = 8
+DEFAULT_SCRYPT_P = 1
+DEFAULT_SCRYPT_MAXMEM = 0  # 0 means using a default value (32 MiB for OpenSSL 1.1.0).
+DEFAULT_SCRYPT_KEYLEN = 64
+
 _os_alt_seps: t.List[str] = list(
     sep for sep in [os.path.sep, os.path.altsep] if sep is not None and sep != "/"
 )
+
+
+def _bin_to_hex(data: bytes) -> str:
+    return codecs.encode(data, "hex_codec").decode("ascii")
 
 
 def pbkdf2_hex(
@@ -40,7 +53,7 @@ def pbkdf2_hex(
                      from the hashlib module.  Defaults to sha256.
     """
     rv = pbkdf2_bin(data, salt, iterations, keylen, hashfunc)
-    return codecs.encode(rv, "hex_codec").decode("ascii")
+    return _bin_to_hex(rv)
 
 
 def pbkdf2_bin(
@@ -78,6 +91,71 @@ def pbkdf2_bin(
     else:
         hash_name = hashfunc
     return hashlib.pbkdf2_hmac(hash_name, data, salt, iterations, keylen)
+
+
+def scrypt_hex(
+    data: t.AnyStr,
+    *,
+    salt: t.AnyStr,
+    n: int = DEFAULT_SCRYPT_N,
+    r: int = DEFAULT_SCRYPT_R,
+    p: int = DEFAULT_SCRYPT_P,
+    maxmem: int = DEFAULT_SCRYPT_MAXMEM,
+    keylen: int = DEFAULT_SCRYPT_KEYLEN,
+) -> str:
+    """Like :func:`scrypt_bin`, but returns a hex-encoded string.
+
+    .. versionadded:: 2.0.0
+
+    :param data: the data to derive.
+    :param salt: the salt for the derivation.
+    :param n: the CPU/Memory cost factor.
+    :param r: the block size.
+    :param p: the parallelization factor.
+    :param maxmem: the memory limit in bytes, 0 can be set to use a default
+                   one (e.g., OpenSSL 1.1.0 defaults to 32 MiB).
+    :param keylen: the length of the resulting key.
+    """
+    rv = scrypt_bin(data, salt=salt, n=n, r=r, p=p, maxmem=maxmem, keylen=keylen)
+    return _bin_to_hex(rv)
+
+
+def scrypt_bin(
+    data: t.AnyStr,
+    *,
+    salt: t.AnyStr,
+    n: int = DEFAULT_SCRYPT_N,
+    r: int = DEFAULT_SCRYPT_R,
+    p: int = DEFAULT_SCRYPT_P,
+    maxmem: int = DEFAULT_SCRYPT_MAXMEM,
+    keylen: int = DEFAULT_SCRYPT_KEYLEN,
+) -> bytes:
+    """Returns a binary key derived by the scrypt function based on `data`
+    with the given `salt`.
+
+    The function takes several parameters. `r` specifies the block size.
+    `n` is a CPU/Memory cost factor that must be a power of 2 larger than 1
+    and smaller than 2 ** (128 * r / 8). `p` is a parallelization factor
+    that must be a positive integer less than or equal to
+    ((2 ** 32-1) * 32) / (128 * r).
+
+    The function will use up to `maxmem` memory to produce a key of
+    `keylen` bytes.
+
+    .. versionadded:: 2.0.0
+
+    :param data: the data to derive.
+    :param salt: the salt for the derivation.
+    :param n: the CPU/Memory cost factor.
+    :param r: the block size.
+    :param p: the parallelization factor.
+    :param maxmem: the memory limit in bytes, 0 can be set to use a default
+                   one (32 MiB for OpenSSL 1.1.0).
+    :param keylen: the length of the resulting key.
+    """
+    data = _to_bytes(data)
+    salt = _to_bytes(salt)
+    return hashlib.scrypt(data, salt=salt, n=n, r=r, p=p, maxmem=maxmem, dklen=keylen)
 
 
 def safe_str_cmp(a: str, b: str) -> bool:
@@ -121,15 +199,32 @@ def _hash_internal(method: str, salt: str, password: str) -> t.Tuple[str, str]:
         method = args.pop(0)
         iterations = int(args[0] or 0) if args else DEFAULT_PBKDF2_ITERATIONS
         is_pbkdf2 = True
+        is_scrypt = True
         actual_method = f"pbkdf2:{method}:{iterations}"
+    elif method.startswith("scrypt"):
+        args_str = method[7:]
+        args = args_str.split(":") if args_str else []
+        if len(args) > 3:
+            raise ValueError("Invalid number of arguments for scrypt")
+        n = int(args.pop(0)) if args else DEFAULT_SCRYPT_N
+        r = int(args.pop(0)) if args else DEFAULT_SCRYPT_R
+        p = int(args.pop(0)) if args else DEFAULT_SCRYPT_P
+        is_pbkdf2 = False
+        is_scrypt = True
+        actual_method = f"scrypt:{n}:{r}:{p}"
     else:
         is_pbkdf2 = False
+        is_scrypt = False
         actual_method = method
 
     if is_pbkdf2:
         if not salt:
             raise ValueError("Salt is required for PBKDF2")
         rv = pbkdf2_hex(password, salt, iterations, hashfunc=method)
+    elif is_scrypt:
+        if not salt:
+            raise ValueError("Salt is required for scrypt")
+        rv = scrypt_hex(password, salt=salt, n=n, r=r, p=p)
     elif salt:
         if isinstance(salt, str):
             salt = salt.encode("utf-8")  # type: ignore
@@ -171,10 +266,15 @@ def generate_password_hash(
         pbkdf2:sha256:80000$salt$hash
         pbkdf2:sha256$salt$hash
 
+    If scrypt is wanted, it can be enabled by setting the method to
+    ``scrypt:n:r:p`` where n, r, p are optional::
+
+        scrypt:16384:8:1$salt$hash
+
     :param password: the password to hash.
     :param method: the hash method to use (one that hashlib supports). Can
                    optionally be in the format ``pbkdf2:method:iterations``
-                   to enable PBKDF2.
+                   to enable PBKDF2 or ``scrypt:n:r:p`` to enable scrypt.
     :param salt_length: the length of the salt in letters.
     """
     salt = gen_salt(salt_length) if method != "plain" else ""

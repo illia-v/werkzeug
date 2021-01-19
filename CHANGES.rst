@@ -127,6 +127,7 @@ Unreleased
 -   Colors in the development server log are displayed if Colorama is
     installed on Windows. For all platforms, style support no longer
     requires Click. :issue:`1832`
+-   Using scrypt for generating password hashes is possible.
 
 
 Version 1.0.2
